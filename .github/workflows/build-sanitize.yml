@@ -28,7 +28,7 @@ env:
 
 jobs:
   ubuntu-latest-sanitizer:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
 
     continue-on-error: true
 
@@ -42,18 +42,18 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
-      - name: ccache
-        uses: ggml-org/ccache-action@v1.2.21
-        with:
-          key: ubuntu-latest-sanitizer-${{ matrix.sanitizer }}
-          evict-old-files: 1d
-          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      #- name: ccache
+      #  uses: ggml-org/ccache-action@v1.2.21
+      #  with:
+      #    key: ubuntu-latest-sanitizer-${{ matrix.sanitizer }}
+      #    evict-old-files: 1d
+      #    save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
-      - name: Dependencies
-        id: depends
-        run: |
-          sudo apt-get update
-          sudo apt-get install build-essential libssl-dev
+      #- name: Dependencies
+      #  id: depends
+      #  run: |
+      #    sudo apt-get update
+      #    sudo apt-get install build-essential libssl-dev
 
       - name: Build
         id: cmake_build
