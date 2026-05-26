@@ -28,14 +28,14 @@ env:
 
 jobs:
   ubuntu-latest-sanitizer:
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, CPU, Linux, TESTING]
 
     continue-on-error: true
 
     strategy:
       matrix:
         sanitizer: [ADDRESS, THREAD, UNDEFINED]
-        build_type: [Debug]
+        build_type: [RelWithDebInfo]
 
     steps:
       - name: Clone
