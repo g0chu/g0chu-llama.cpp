@@ -154,9 +154,7 @@ static void common_params_fit_impl(
         const char * path_model, struct llama_model_params * mparams, struct llama_context_params * cparams,
         float * tensor_split, struct llama_model_tensor_buft_override * tensor_buft_overrides,
         size_t * margins_s, uint32_t n_ctx_min, enum ggml_log_level log_level) {
-    if (mparams->split_mode == LLAMA_SPLIT_MODE_TENSOR) {
-        throw common_params_fit_exception("llama_params_fit is not implemented for SPLIT_MODE_TENSOR, abort");
-    }
+    bool is_tensor_split = (mparams->split_mode == LLAMA_SPLIT_MODE_TENSOR);
     constexpr int64_t MiB = 1024*1024;
     typedef std::vector<llama_device_memory_data> dmds_t;
     const llama_model_params default_mparams = llama_model_default_params();
@@ -344,6 +342,27 @@ static void common_params_fit_impl(
                 LOG_TRC("%s: context size set by user to %" PRIu32 " -> no change\n", __func__, cparams->n_ctx);
             }
         }
+    }
+
+    if (is_tensor_split) {
+        // step 2.5: calculate tensor split based on available free memory after context reduction
+        std::vector<double> model_capacities(nd);
+        double total_capacity = 0;
+
+        for (size_t id = 0; id < nd; id++) {
+            int64_t available = dmds_full[id].free - dmds_full[id].mb.context - margins[id];
+            model_capacities[id] = std::max(0.0, (double)available);
+            total_capacity += model_capacities[id];
+        }
+
+        for (size_t id = 0; id < nd; id++) {
+            if (total_capacity > 0) {
+                tensor_split[id] = (float)(model_capacities[id] / total_capacity);
+            } else {
+                tensor_split[id] = (nd > 0) ? (1.0f / nd) : 0.0f;
+            }
+        }
+        return;
     }
     if (nd == 0) {
         throw common_params_fit_exception("was unable to fit model into system memory by reducing context, abort");

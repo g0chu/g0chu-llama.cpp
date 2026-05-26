@@ -485,7 +485,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
         return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
     };
 
-    auto get_split_segments = [&](int axis, uint32_t il) -> std::vector<int64_t> {
+    auto get_split_segments = [&](const ggml_tensor * tensor_axis_0, int axis, uint32_t il) -> std::vector<int64_t> {
         if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE) {
             const int64_t head_k_dim = hparams.ssm_d_state;
             const int64_t head_v_dim = hparams.ssm_d_state;
@@ -498,33 +498,33 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             //   - Qwen 3 Next: [k0_v0, k0_v1, k1_v2, k1_v3] (this is the default split pattern)
             //   - Qwen 3.5:    [k0_v0, k1_v1, k0_v2, k1_v3] (needs segmenting of V on the scale of K to get the correct pattern)
             if (ud->model->arch == LLM_ARCH_QWEN3NEXT) {
-                if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_ssm_conv1d)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_qkv_weight) || std::regex_match(tensor_axis_0->name, pattern_ssm_conv1d)) {
                     GGML_ASSERT(tensor->ne[axis] == 2*key_dim + value_dim);
                     return {key_dim, key_dim, value_dim};
                 }
             } else {
                 const int64_t head_ratio = n_v_heads / n_k_heads;
-                if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_ssm_conv1d)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_qkv_weight) || std::regex_match(tensor_axis_0->name, pattern_ssm_conv1d)) {
                     GGML_ASSERT(tensor->ne[axis] == 2*key_dim + value_dim);
                     return std::vector<int64_t>(2 + head_ratio, key_dim);
                 }
-                if (std::regex_match(tensor_name, pattern_attn_gate_weight) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_attn_gate_weight) || std::regex_match(tensor_axis_0->name, pattern_ssm_out_weight)) {
                     return std::vector<int64_t>(head_ratio, key_dim);
                 }
-                if (std::regex_match(tensor_name, pattern_ssm_dt) || std::regex_match(tensor_name, pattern_ssm_a) ||
-                        std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_ssm_dt) || std::regex_match(tensor_axis_0->name, pattern_ssm_a) ||
+                        std::regex_match(tensor_axis_0->name, pattern_ssm_alpha) || std::regex_match(tensor_axis_0->name, pattern_ssm_beta)) {
                     return std::vector<int64_t>(head_ratio, n_k_heads);
                 }
-                if (std::regex_match(tensor_name, pattern_r_cache)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_r_cache)) {
                     return std::vector<int64_t>(2 + head_ratio, key_dim * (hparams.ssm_d_conv - 1));
                 }
-                if (std::regex_match(tensor_name, pattern_s_cache)) {
+                if (std::regex_match(tensor_axis_0->name, pattern_s_cache)) {
                     return std::vector<int64_t>(head_ratio, n_k_heads * head_v_dim * head_v_dim);
                 }
             }
 
             // the FFN is the same for Qwen 3 Next and Qwen 3.5:
-            if (std::regex_match(tensor_name, pattern_ffn_gate_up_weight)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_ffn_gate_up_weight)) {
                 const int64_t n_ff_exp = hparams.n_ff_exp;
                 GGML_ASSERT(tensor->ne[axis] == 2*n_ff_exp);
                 return {n_ff_exp, n_ff_exp};
@@ -532,54 +532,56 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             return {tensor->ne[axis]};
         }
 
-        if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_qkv_bias)) {
+        if (std::regex_match(tensor_axis_0->name, pattern_qkv_weight) || std::regex_match(tensor_axis_0->name, pattern_qkv_bias)) {
             const int64_t n_embd      = hparams.n_embd;
             const int64_t n_embd_gqa  = hparams.n_embd_v_gqa(il);
             GGML_ASSERT(hparams.n_embd_k_gqa() == n_embd_gqa);
             GGML_ASSERT(tensor->ne[axis] == n_embd + 2*n_embd_gqa);
             return {n_embd, n_embd_gqa, n_embd_gqa};
         }
-        if (std::regex_match(tensor_name, pattern_ffn_gate_up_weight)) {
+        if (std::regex_match(tensor_axis_0->name, pattern_ffn_gate_up_weight)) {
             const int64_t n_ff_exp = hparams.n_ff_exp;
             GGML_ASSERT(tensor->ne[axis] == 2*n_ff_exp);
             return {n_ff_exp, n_ff_exp};
         }
-        return {tensor->ne[axis]};
+        std::vector<int64_t> segments = {tensor->ne[axis]};
+        GGML_ASSERT(!segments.empty());
+        return segments;
     };
 
-    auto get_split_granularity = [&](int64_t blck_size, uint32_t il, const std::vector<int64_t> & segments) -> std::vector<int64_t> {
+    auto get_split_granularity = [&](const ggml_tensor * tensor_axis_0, int64_t blck_size, uint32_t il, const std::vector<int64_t> & segments) -> std::vector<int64_t> {
         if (hparams.is_recurrent(il)) {
             // linear attention
             const int64_t head_dim  = hparams.ssm_d_state;
             const int64_t granularity_qkv = std::lcm(blck_size, head_dim);
-            if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_attn_gate_weight) ||
-                    std::regex_match(tensor_name, pattern_ssm_conv1d) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_qkv_weight) || std::regex_match(tensor_axis_0->name, pattern_attn_gate_weight) ||
+                    std::regex_match(tensor_axis_0->name, pattern_ssm_conv1d) || std::regex_match(tensor_axis_0->name, pattern_ssm_out_weight)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv);
             }
-            if (std::regex_match(tensor_name, pattern_ssm_dt) || std::regex_match(tensor_name, pattern_ssm_a) ||
-                    std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_ssm_dt) || std::regex_match(tensor_axis_0->name, pattern_ssm_a) ||
+                    std::regex_match(tensor_axis_0->name, pattern_ssm_alpha) || std::regex_match(tensor_axis_0->name, pattern_ssm_beta)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv / head_dim);
             }
-            if (std::regex_match(tensor_name, pattern_ssm_beta_alpha)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_ssm_beta_alpha)) {
                 return std::vector<int64_t>(segments.size(), 2 * (granularity_qkv / head_dim));
             }
-            if (std::regex_match(tensor_name, pattern_r_cache)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_r_cache)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv * (hparams.ssm_d_conv - 1));
             }
-            if (std::regex_match(tensor_name, pattern_s_cache)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_s_cache)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv * head_dim);
             }
         } else {
             // regular attention
             const uint32_t n_gqa    = hparams.n_gqa(il);
             const uint32_t n_embd_q = n_gqa * hparams.n_embd_head_k(il);
-            if (std::regex_match(tensor_name, pattern_attn_sinks)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_attn_sinks)) {
                 GGML_ASSERT(segments.size() == 1);
                 return {std::lcm(n_embd_q, blck_size)/n_embd_q * n_gqa};
             }
 
             const int64_t granularity_q = std::lcm(n_embd_q, blck_size);
-            if (std::regex_match(tensor_name, pattern_q_weight) || std::regex_match(tensor_name, pattern_q_bias)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_q_weight) || std::regex_match(tensor_axis_0->name, pattern_q_bias)) {
                 GGML_ASSERT(segments.size() == 1);
                 // some models have Q gate tensors, for those cases the granularity needs to be doubled:
                 if (ud->model->arch == LLM_ARCH_QWEN3NEXT || ud->model->arch == LLM_ARCH_QWEN35 || ud->model->arch == LLM_ARCH_QWEN35MOE) {
@@ -587,27 +589,27 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                 }
                 return {granularity_q};
             }
-            if (std::regex_match(tensor_name, pattern_attn_out_weight)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_attn_out_weight)) {
                 GGML_ASSERT(segments.size() == 1);
                 return {granularity_q};
             }
 
             const int64_t granularity_kv = granularity_q / n_gqa;
-            if (std::regex_match(tensor_name, pattern_kv_weight) ||
-                std::regex_match(tensor_name, pattern_kv_bias) ||
-                std::regex_match(tensor_name, pattern_kv_cache)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_kv_weight) ||
+                std::regex_match(tensor_axis_0->name, pattern_kv_bias) ||
+                std::regex_match(tensor_axis_0->name, pattern_kv_cache)) {
                 GGML_ASSERT(segments.size() == 1);
                 return {granularity_kv};
             }
-            if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_qkv_bias)) {
+            if (std::regex_match(tensor_axis_0->name, pattern_qkv_weight) || std::regex_match(tensor_axis_0->name, pattern_qkv_bias)) {
                 GGML_ASSERT(segments.size() == 3);
                 return {granularity_q, granularity_kv, granularity_kv};
             }
         }
 
         // FFN
-        if (std::regex_match(tensor_name, pattern_ffn_up_gate_weight) || std::regex_match(tensor_name, pattern_ffn_up_gate_bias) ||
-                std::regex_match(tensor_name, pattern_ffn_gate_up_weight) || std::regex_match(tensor_name, pattern_ffn_down_weight)) {
+        if (std::regex_match(tensor_axis_0->name, pattern_ffn_up_gate_weight) || std::regex_match(tensor_axis_0->name, pattern_ffn_up_gate_bias) ||
+                std::regex_match(tensor_axis_0->name, pattern_ffn_gate_up_weight) || std::regex_match(tensor_axis_0->name, pattern_ffn_down_weight)) {
             GGML_ASSERT(segments.size() <= 2);
             return std::vector<int64_t>(segments.size(), blck_size);
         }
@@ -622,8 +624,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     tensor_config tc = get_tensor_config();
     split_state.axis = tc.axis;
     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
-        const int64_t ne_full = tensor->ne[split_state.axis];
-        const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
+        // Use LCM to ensure divisibility for both the reference tensor type and the actual tensor type
+        const int64_t blck_size = std::lcm(ggml_blck_size(tc.tensor_axis_0->type), ggml_blck_size(tensor->type));
         const float * tensor_split = ud->model->tensor_split();
         std::vector<float> tensor_split_scan;
         tensor_split_scan.reserve(ud->n_devices);
@@ -633,25 +635,60 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                 tensor_split_scan[j] += tensor_split_scan[j - 1];
             }
         }
-        const std::vector<int64_t> segments = get_split_segments(split_state.axis, tc.il);
-        const std::vector<int64_t> granularity = get_split_granularity(blck_size, tc.il, segments);
+        const std::vector<int64_t> segments_raw = get_split_segments(tc.tensor_axis_0, split_state.axis, tc.il);
+        const std::vector<int64_t> granularity_raw = get_split_granularity(tc.tensor_axis_0, blck_size, tc.il, segments_raw);
+
+        std::vector<int64_t> segments = segments_raw;
+        std::vector<int64_t> granularity = granularity_raw;
+
+        bool any_unaligned = false;
+        for (size_t is = 0; is < segments.size(); is++) {
+            int64_t g_s = granularity[is];
+            if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                g_s = std::lcm(g_s, blck_size);
+            }
+            if (segments[is] % g_s != 0) {
+                any_unaligned = true;
+                break;
+            }
+        }
+
+        // Fall back to actual tensor dimensions if segment total doesn't match
+        int64_t seg_sum = 0;
+        for (int64_t s : segments) {
+            seg_sum += s;
+        }
+        if (seg_sum != tensor->ne[split_state.axis]) {
+            any_unaligned = true;
+        }
+
+        if (any_unaligned) {
+            segments = { tensor->ne[split_state.axis] };
+            granularity = { (split_state.axis == GGML_BACKEND_SPLIT_AXIS_0 ? blck_size : 1) };
+        }
+
         for (size_t is = 0; is < segments.size(); is++) {
             const int64_t ne_s = segments[is];
-            const int64_t g_s = granularity[is];
-            GGML_ASSERT(ne_full % g_s == 0);
+            int64_t g_s = granularity[is];
+            if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                g_s = std::lcm(g_s, blck_size);
+            }
             int64_t low = 0;
             size_t j = 0;
             for (; j < ud->n_devices - 1; j++) {
-                int64_t high = tensor_split_scan.back() == 0.0f ?
-                    ne_s * (j+1)/ud->n_devices : ne_s * tensor_split_scan[j]/tensor_split_scan.back();
-                if (high % g_s != 0) {
-                    high -= high % g_s;
+                int64_t high = 0;
+                if (tensor_split_scan.back() == 0.0f) {
+                    high = static_cast<int64_t>((static_cast<double>(ne_s) * (j + 1)) / ud->n_devices);
+                } else {
+                    high = static_cast<int64_t>((static_cast<double>(ne_s) * tensor_split_scan[j]) / tensor_split_scan.back());
                 }
+                high = (high / g_s) * g_s;
                 split_state.ne[is*ud->n_devices + (j + tc.rotation) % ud->n_devices] = high - low;
                 low = high;
             }
             split_state.ne[is*ud->n_devices + (j + tc.rotation) % ud->n_devices] = ne_s - low;
         }
+
         split_state.n_segments = segments.size();
     } else {
         memset(split_state.ne, 0, sizeof(split_state.ne));
